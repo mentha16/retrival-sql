@@ -1,0 +1,86 @@
+The Core Problem
+
+  Clients' queries will be natural language, but corpus is SQL. These live in
+  different semantic spaces:
+
+  NL query:  "show me monthly revenue"
+             ↓ embed
+             [0.21, 0.54, -0.33, ...]
+
+  SQL only:  SELECT SUM(amount) FROM orders GROUP BY MONTH(order_date)
+             ↓ embed
+             [0.67, -0.12, 0.88, ...]   ← far apart despite same meaning
+
+  The embedding model has to bridge that gap at search time — that's hard.
+
+  ---
+  Option Comparison
+
+  1. SQL Only
+
+  Index:  embed(SQL)
+  Query:  embed("monthly revenue") → search
+  - Model struggles to align NL vector with SQL vector
+  - Works better with code-specialized models (StarCoder, CodeBERT)
+  - Accuracy: ~60-70% recall@10
+
+  2. Description Only (generated offline)
+
+  Index:  embed("Total revenue aggregated by month from orders")
+  Query:  embed("monthly revenue") → search
+  - NL-to-NL matching, same semantic space
+  - Loses structural SQL signal (exact table names, functions)
+  - Accuracy: ~75-80% recall@10
+
+  3. Description + SQL (recommended)
+
+  Index:  embed("Total revenue aggregated by month\nSELECT SUM(amount) FROM orders
+  GROUP BY MONTH(order_date)")
+  Query:  embed("monthly revenue") → search
+  - Bridges both spaces in one vector
+  - NL query aligns with description part, SQL part adds structural signal
+  - Accuracy: ~82-88% recall@10
+
+  4. Dual Encoder (best but expensive)
+
+  Index:  embed_sql(SQL)           ← SQL-specific encoder
+  Query:  embed_query("monthly revenue")  ← query-specific encoder
+  - Two separate encoders trained to align NL↔SQL in the same space
+  - Used by text-to-SQL systems (like DIN-SQL, DAIL-SQL)
+  - Requires fine-tuning on SQL/NL pairs
+  - Accuracy: ~88-93% recall@10 but needs labeled data to train
+
+  ---
+Plans
+
+  Phase 1 (ship fast):
+    embed(description + SQL) using text-embedding-3-large
+
+    description = llm_batch_generate(sql)  ← offline, one-time cost
+    stored_text = description + "\n" + sql
+    vector = embed(stored_text)
+
+  Phase 2 (if accuracy matters):
+    Fine-tune a dual encoder on examples your users actually search for
+    Use Phase 1 retrieval logs as weak supervision signal
+
+  The description+SQL approach gives you ~85% of the accuracy of a fine-tuned dual
+  encoder with zero training data required — which matters a lot when you have 100M
+  SQL and no question labels.
+
+  ---
+  Practical Accuracy Booster
+
+  Regardless of embedding strategy, add a reranker after retrieval:
+
+  Retrieve top-50 via ANN (fast, approximate)
+       ↓
+  Rerank top-50 using cross-encoder (slow but accurate, only 50 pairs)
+       ↓
+  Return top-10
+
+  Cross-encoder sees: (query, sql) together → much better relevance score
+  Latency cost: +20-50ms, accuracy gain: +10-15%
+
+  This is usually cheaper than improving the embedding model and gives a bigger
+  accuracy jump.
