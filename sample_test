@@ -1,0 +1,349 @@
+"""
+SQL Dedup Pipeline - Stage 1, 2, 3 & 4 Analysis
+Reads sql_samples_expanded.csv and measures survival at each dedup stage.
+
+Stage 1: String normalisation   — lowercase + literal parameterisation
+Stage 2: AST canonical form     — alias expansion, INNER/RIGHT JOIN normalisation
+Stage 3: SQL optimizer          — subquery elimination, predicate pushdown
+Stage 4: LSH (MinHash)          — fuzzy grouping of structurally similar queries
+"""
+
+import csv
+import re
+from collections import defaultdict
+
+import sqlglot
+from sqlglot import exp, optimizer
+from datasketch import MinHash, MinHashLSH
+
+
+def load_expanded_csv(path: str) -> list[dict]:
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 – string normalisation
+# ---------------------------------------------------------------------------
+def stage1_normalize(sql: str) -> str:
+    s = sql.lower()
+    s = re.sub(r"'[^']*'", "'?'", s)      # string literals → '?'
+    s = re.sub(r"\b\d+\b", "0", s)        # numeric literals → 0
+    s = re.sub(r"\s+", " ", s).strip()    # collapse whitespace
+    s = s.rstrip(";").strip()              # drop trailing semicolon
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 – AST canonical form via sqlglot
+# ---------------------------------------------------------------------------
+def _flip_right_joins(tree: exp.Expression) -> exp.Expression:
+    """
+    RIGHT JOIN A ON ... → LEFT JOIN A ON ... with tables swapped.
+    FROM x RIGHT JOIN y  becomes  FROM y LEFT JOIN x
+    so the driving (preserved) table is always on the left.
+    """
+    select = tree if isinstance(tree, exp.Select) else tree.find(exp.Select)
+    if select is None:
+        return tree
+
+    from_clause = select.args.get("from")
+    joins = select.args.get("joins") or []
+
+    for join in joins:
+        if join.args.get("kind", "").upper() == "RIGHT" and from_clause:
+            left_table  = from_clause.this.copy()
+            right_table = join.this.copy()
+            from_clause.set("this", right_table)   # y becomes the new FROM
+            join.set("this", left_table)            # x becomes the JOIN table
+            join.set("kind", "LEFT")
+
+    return tree
+
+
+def stage2_normalize(sql: str) -> str | None:
+    """
+    Parse SQL (already stage-1 normalised) and return a canonical string:
+      - RIGHT JOIN  → LEFT JOIN  (tables swapped)
+      - INNER JOIN  → JOIN
+      - Aliases expanded to real table names
+      - Lowercased
+    """
+    try:
+        tree = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.IGNORE)
+        if tree is None:
+            return None
+
+        # 1. Flip RIGHT JOINs before any alias work
+        tree = _flip_right_joins(tree)
+
+        # 2. Build alias → table name map
+        alias_map: dict[str, str] = {}
+        for table in tree.find_all(exp.Table):
+            if table.alias:
+                alias_map[table.alias.lower()] = table.name.lower()
+
+        # 3. Replace alias prefixes on column references
+        for col in tree.find_all(exp.Column):
+            if col.table and col.table.lower() in alias_map:
+                col.set("table", exp.to_identifier(alias_map[col.table.lower()]))
+
+        # 4. Strip aliases from table nodes
+        for table in tree.find_all(exp.Table):
+            if table.alias:
+                table.set("alias", None)
+
+        # 5. Normalise INNER JOIN → JOIN (semantically identical)
+        for join in tree.find_all(exp.Join):
+            if join.args.get("kind", "").upper() == "INNER":
+                join.set("kind", "")
+
+        return tree.sql().lower()
+
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 – sqlglot optimizer (subquery elimination, predicate pushdown)
+# ---------------------------------------------------------------------------
+# Minimal schema so the optimizer can resolve column references.
+_SCHEMA = {
+    "employees":   {"name": "text", "department_id": "int", "salary": "int"},
+    "departments": {"id": "int",    "name": "text"},
+}
+
+def stage3_normalize(sql: str) -> str | None:
+    """
+    Run sqlglot's full optimizer on the stage-2 canonical SQL.
+    Key transforms:
+      - IN / EXISTS / scalar subqueries  → JOINs
+      - CTEs / derived tables            → inlined JOINs
+      - Predicate pushdown
+    """
+    try:
+        tree = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.IGNORE)
+        if tree is None:
+            return None
+        optimized = optimizer.optimize(tree, schema=_SCHEMA)
+        return optimized.sql().lower()
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 – LSH (MinHash) fuzzy grouping
+# ---------------------------------------------------------------------------
+def _sql_bigrams(sql: str) -> set[str]:
+    """Tokenise SQL and return the set of token bigrams (shingles)."""
+    tokens = re.findall(r'"[^"]*"|\b\w+\b|[^\w\s]', sql)
+    return {f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens) - 1)}
+
+
+def _make_minhash(shingles: set[str], num_perm: int = 128) -> MinHash:
+    m = MinHash(num_perm=num_perm)
+    for s in shingles:
+        m.update(s.encode("utf8"))
+    return m
+
+
+class _UnionFind:
+    """Groups items into clusters by merging connected pairs."""
+    def __init__(self, keys):
+        self.parent = {k: k for k in keys}
+
+    def find(self, k):
+        while self.parent[k] != k:
+            self.parent[k] = self.parent[self.parent[k]]
+            k = self.parent[k]
+        return k
+
+    def union(self, a, b):
+        self.parent[self.find(a)] = self.find(b)
+
+    def clusters(self):
+        groups = defaultdict(list)
+        for k in self.parent:
+            groups[self.find(k)].append(k)
+        return list(groups.values())
+
+
+def apply_stage4(
+    s3_groups: dict[str, list[dict]],
+    threshold: float = 0.5,
+    num_perm: int = 128,
+) -> dict[str, list[dict]]:
+    """
+    Group stage-3 survivors by structural similarity using MinHash LSH.
+
+    Each canonical SQL → token bigrams → MinHash signature.
+    LSH finds pairs with Jaccard similarity ≥ threshold.
+    Union-Find merges those pairs into clusters.
+    """
+    keys = list(s3_groups.keys())
+
+    # Build MinHash per stage-3 key
+    minhashes = {k: _make_minhash(_sql_bigrams(k), num_perm) for k in keys}
+
+    # Find similar pairs via LSH
+    lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
+    for k, mh in minhashes.items():
+        lsh.insert(k, mh)
+
+    uf = _UnionFind(keys)
+    for k, mh in minhashes.items():
+        for neighbour in lsh.query(mh):
+            if neighbour != k:
+                uf.union(k, neighbour)
+
+    # Merge stage-3 groups that landed in the same cluster
+    new_groups: dict[str, list[dict]] = {}
+    for cluster in uf.clusters():
+        representative = max(cluster, key=len)   # longest key as label
+        new_groups[representative] = [m for k in cluster for m in s3_groups[k]]
+
+    return new_groups
+
+
+# ---------------------------------------------------------------------------
+# Apply stages
+# ---------------------------------------------------------------------------
+def apply_stage1(rows: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        key = stage1_normalize(r["sql_query"])
+        groups[key].append(r)
+    return groups
+
+
+def apply_stage2(s1_groups: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for s1_key, members in s1_groups.items():
+        canonical = stage2_normalize(s1_key) or s1_key
+        groups[canonical].extend(members)
+    return groups
+
+
+def apply_stage3(s2_groups: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for s2_key, members in s2_groups.items():
+        canonical = stage3_normalize(s2_key) or s2_key
+        groups[canonical].extend(members)
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+def report(total: int, s1_groups: dict, s2_groups: dict, s3_groups: dict, s4_groups: dict) -> None:
+    sep = "=" * 72
+    s1_count = len(s1_groups)
+    s2_count = len(s2_groups)
+    s3_count = len(s3_groups)
+    s4_count = len(s4_groups)
+
+    print(sep)
+    print("  DEDUP PIPELINE — SURVIVAL REPORT")
+    print(sep)
+    print(f"\n  Stage 0  raw input          : {total:>4} queries")
+    print(f"  Stage 1  string normalise   : {s1_count:>4} unique   "
+          f"(−{total - s1_count}, {(total - s1_count) / total * 100:.0f}% removed)")
+    print(f"  Stage 2  AST canonical      : {s2_count:>4} unique   "
+          f"(−{s1_count - s2_count}, {(s1_count - s2_count) / s1_count * 100:.0f}% of Stage 1 removed)")
+    print(f"  Stage 3  optimizer          : {s3_count:>4} unique   "
+          f"(−{s2_count - s3_count}, {(s2_count - s3_count) / s2_count * 100:.0f}% of Stage 2 removed)")
+    print(f"  Stage 4  LSH (threshold=0.5): {s4_count:>4} unique   "
+          f"(−{s3_count - s4_count}, {(s3_count - s4_count) / s3_count * 100:.0f}% of Stage 3 removed)")
+
+    for label, groups in [("Stage-1", s1_groups), ("Stage-2", s2_groups), ("Stage-3", s3_groups), ("Stage-4", s4_groups)]:
+        print(f"\n  {label} survivors:")
+        print(f"  {'#':>3}  {'merged':>6}  pattern name")
+        print(f"  {'-'*3}  {'-'*6}  {'-'*52}")
+        for i, (_, members) in enumerate(sorted(groups.items()), 1):
+            names = sorted({m["pattern_name"] for m in members})
+            note = (f"  ← merged {len(names)}: {', '.join(n.split('(')[0].strip() for n in names)}"
+                    if len(names) > 1 else "")
+            print(f"  {i:>3}  {len(members):>6}  {names[0]}{note}")
+
+    print(f"\n{sep}")
+    print(f"  {total}  →  {s1_count}  →  {s2_count}  →  {s3_count}  →  {s4_count}  queries remaining")
+    print(f"  Stage 1 captured  : {(total - s1_count) / total * 100:.0f}%  (literals, whitespace, case)")
+    print(f"  Stage 2 captured  : {(s1_count - s2_count) / total * 100:.0f}%  (aliases, INNER/RIGHT JOIN normalisation)")
+    print(f"  Stage 3 captured  : {(s2_count - s3_count) / total * 100:.0f}%  (subquery elimination, predicate pushdown)")
+    print(f"  Stage 4 captured  : {(s3_count - s4_count) / total * 100:.0f}%  (LSH structural similarity)")
+    print(f"  Still distinct    : {s4_count}  → need embedding to cluster semantic equivalents")
+    print(sep)
+
+
+# ---------------------------------------------------------------------------
+# CSV savers
+# ---------------------------------------------------------------------------
+def save_stage_csv(prev_groups: dict, curr_groups: dict, prev_col: str, curr_col: str, path: str) -> None:
+    """
+    One row per current group.
+    - merged_patterns : comma-separated pattern names that collapsed into this group
+    - merged_count    : how many prev-stage keys were merged (>1 means something was deduplicated)
+    - prev_col        : one representative previous-stage canonical form
+    - curr_col        : the new canonical form after this stage
+    """
+    # Map each prev key → its curr key
+    prev_key_to_curr: dict[str, str] = {}
+    for curr_key, members in curr_groups.items():
+        for m in members:
+            # find this member's prev key
+            for pk, pm in prev_groups.items():
+                if any(p["sql_query"] == m["sql_query"] for p in pm):
+                    prev_key_to_curr[pk] = curr_key
+                    break
+
+    # Group prev keys by the curr key they map to
+    curr_to_prev_keys: dict[str, list[str]] = defaultdict(list)
+    for pk, ck in prev_key_to_curr.items():
+        curr_to_prev_keys[ck].append(pk)
+
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["merged_count", "merged_patterns", prev_col, curr_col]
+        )
+        writer.writeheader()
+        for curr_key, prev_keys in sorted(curr_to_prev_keys.items()):
+            patterns = sorted({
+                m["pattern_name"]
+                for pk in prev_keys
+                for m in prev_groups[pk]
+            })
+            writer.writerow({
+                "merged_count":    len(prev_keys),
+                "merged_patterns": " | ".join(patterns),
+                prev_col:          prev_keys[0],
+                curr_col:          curr_key,
+            })
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    rows = load_expanded_csv("sql_samples_expanded.csv")
+    print(f"Loaded {len(rows)} rows from sql_samples_expanded.csv\n")
+
+    s1_groups = apply_stage1(rows)
+    save_stage_csv(
+        {r["sql_query"]: [r] for r in rows}, s1_groups,
+        "original_sql", "stage1_normalized", "stage1_output.csv"
+    )
+    print("Saved stage1_output.csv")
+
+    s2_groups = apply_stage2(s1_groups)
+    save_stage_csv(s1_groups, s2_groups, "stage1_normalized", "stage2_canonical", "stage2_output.csv")
+    print("Saved stage2_output.csv")
+
+    s3_groups = apply_stage3(s2_groups)
+    save_stage_csv(s2_groups, s3_groups, "stage2_canonical", "stage3_optimized", "stage3_output.csv")
+    print("Saved stage3_output.csv")
+
+    s4_groups = apply_stage4(s3_groups, threshold=0.5)
+    save_stage_csv(s3_groups, s4_groups, "stage3_optimized", "stage4_lsh_cluster", "stage4_output.csv")
+    print("Saved stage4_output.csv\n")
+
+    report(len(rows), s1_groups, s2_groups, s3_groups, s4_groups)
