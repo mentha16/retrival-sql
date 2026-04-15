@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NL-to-SQL Data Agent — Architecture Tracker</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
+  :root {
+    --bg:#0f1117; --bg2:#161b27; --bg3:#1e2535;
+    --border:#2a3248; --border2:#3a4560;
+    --text:#e2e8f0; --muted:#6b7a99; --dim:#3d4d6a;
+    --purple:#7c6fcd; --purple-bg:#1a1730; --purple-border:#3d3570;
+    --teal:#2dd4bf;   --teal-bg:#0d2420;   --teal-border:#1a4a42;
+    --amber:#f59e0b;  --amber-bg:#1f1508;  --amber-border:#4a3010;
+    --coral:#f87171;  --coral-bg:#2a1010;  --coral-border:#5a2020;
+    --gray-c:#94a3b8; --gray-bg:#151c2a;   --gray-border:#2a3850;
+    --green:#4ade80; --blue:#60a5fa; --red:#f87171;
+    --font:'IBM Plex Sans',sans-serif; --mono:'IBM Plex Mono',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;}
+  .header{display:flex;align-items:center;justify-content:space-between;padding:14px 28px;border-bottom:1px solid var(--border);background:var(--bg);position:sticky;top:0;z-index:100;}
+  .header-left{display:flex;align-items:center;gap:12px;}
+  .logo{width:26px;height:26px;background:var(--purple);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500;color:#fff;font-family:var(--mono);}
+  .title{font-size:14px;font-weight:500;}
+  .subtitle{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:1px;}
+  .header-right{display:flex;align-items:center;gap:8px;}
+  .tabs{display:flex;gap:2px;background:var(--bg3);border-radius:8px;padding:3px;}
+  .tab{padding:5px 13px;border-radius:6px;font-size:12px;cursor:pointer;color:var(--muted);transition:all .15s;border:none;background:none;font-family:var(--font);}
+  .tab.active{background:var(--bg2);color:var(--text);border:1px solid var(--border2);}
+  .tab:hover:not(.active){color:var(--text);}
+  .summary-bar{display:flex;border-bottom:1px solid var(--border);padding:0 28px;background:var(--bg);}
+  .stat{padding:10px 18px;border-right:1px solid var(--border);display:flex;align-items:center;gap:7px;}
+  .stat:first-child{padding-left:0;}
+  .stat-dot{width:7px;height:7px;border-radius:50%;}
+  .stat-num{font-size:17px;font-weight:500;font-family:var(--mono);}
+  .stat-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
+  .main{display:flex;height:calc(100vh - 100px);}
+  .diagram-panel{flex:1;overflow:auto;padding:28px;position:relative;}
+  .right-panel{width:320px;border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;transition:width .2s;}
+  .right-panel.collapsed{width:0;border-left:none;}
+  .panel-header{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
+  .panel-header h3{font-size:13px;font-weight:500;}
+  .panel-body{flex:1;overflow-y:auto;padding:14px 16px;}
+  .close-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:2px 5px;border-radius:4px;}
+  .close-btn:hover{background:var(--bg3);color:var(--text);}
+  .detail-name{font-size:15px;font-weight:500;margin-bottom:4px;}
+  .detail-row{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:12px;}
+  .detail-label{color:var(--muted);}
+  .detail-val{font-family:var(--mono);font-size:11px;}
+  .badge{font-size:10px;font-weight:500;padding:2px 8px;border-radius:99px;font-family:var(--mono);text-transform:uppercase;}
+  .badge-ready{background:#0d2e14;color:var(--green);border:1px solid #1a5028;}
+  .badge-inprogress{background:#1f1508;color:var(--amber);border:1px solid #4a3010;}
+  .badge-planned{background:#0e1a2e;color:var(--blue);border:1px solid #1a3a60;}
+  .badge-blocked{background:#2a0e0e;color:var(--red);border:1px solid #5a1a1a;}
+  .section-title{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:14px 0 7px;}
+  .conn-item{display:flex;align-items:center;padding:7px 10px;border-radius:6px;background:var(--bg3);border:1px solid var(--border);margin-bottom:5px;font-size:12px;gap:6px;}
+  .conn-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .conn-badge{font-size:10px;font-family:var(--mono);padding:2px 7px;border-radius:99px;flex-shrink:0;}
+  .conn-solid{background:#1a2a1a;color:#4ade80;border:1px solid #2a4a2a;}
+  .conn-dashed{background:#1a1a2e;color:#60a5fa;border:1px solid #1a2a4a;}
+  .conn-dir{font-size:10px;color:var(--muted);font-family:var(--mono);flex-shrink:0;}
+  .conn-remove{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 4px;border-radius:3px;flex-shrink:0;}
+  .conn-remove:hover{color:var(--red);background:#2a1010;}
+  .add-conn-box{margin-top:8px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;}
+  .add-conn-box label{display:block;font-size:11px;color:var(--muted);margin-bottom:4px;}
+  .add-conn-box select{width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:5px;color:var(--text);font-size:12px;font-family:var(--font);padding:6px 8px;outline:none;margin-bottom:6px;}
+  .add-conn-box select:focus{border-color:var(--purple);}
+  .type-row{display:flex;gap:5px;margin-bottom:7px;}
+  .type-opt{flex:1;padding:5px 0;border-radius:5px;border:1px solid var(--border2);background:transparent;color:var(--muted);font-size:11px;cursor:pointer;font-family:var(--font);text-align:center;transition:all .12s;}
+  .type-opt.active{border-color:var(--purple);color:var(--text);background:var(--purple-bg);}
+  .edit-section{margin-top:14px;}
+  .edit-section h4{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;}
+  .field{margin-bottom:9px;}
+  .field label{display:block;font-size:11px;color:var(--muted);margin-bottom:3px;}
+  .field input,.field select,.field textarea{width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:5px;color:var(--text);font-size:12px;font-family:var(--font);padding:6px 9px;outline:none;}
+  .field input:focus,.field select:focus,.field textarea:focus{border-color:var(--purple);}
+  .field select option{background:var(--bg3);}
+  .field textarea{resize:vertical;min-height:52px;}
+  .btn{padding:6px 13px;border-radius:5px;font-size:12px;cursor:pointer;font-family:var(--font);border:none;}
+  .btn-primary{background:var(--purple);color:#fff;}
+  .btn-primary:hover{background:#9480e0;}
+  .btn-danger{background:#2a0e0e;color:var(--red);border:1px solid #5a1a1a;}
+  .btn-danger:hover{background:#3a1010;}
+  .btn-sm{width:100%;padding:6px 0;font-size:11px;background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:5px;cursor:pointer;font-family:var(--font);}
+  .btn-sm:hover{border-color:var(--purple);color:var(--purple);}
+  .btn-row{display:flex;gap:6px;margin-top:10px;}
+  .hint{font-size:11px;color:var(--dim);text-align:center;margin-top:10px;}
+  .list-tbl{width:100%;border-collapse:collapse;border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+  .list-tbl th{padding:9px 11px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:500;text-align:left;border-bottom:1px solid var(--border);background:var(--bg3);}
+  .list-tbl td{padding:9px 11px;font-size:12px;border-bottom:1px solid var(--border);}
+  .list-tbl tr:last-child td{border-bottom:none;}
+  .list-tbl tr{cursor:pointer;}
+  .list-tbl tr:hover td{background:var(--bg3);}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--bg3);border:1px solid var(--border2);border-radius:7px;padding:8px 16px;font-size:12px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:999;}
+  .toast.show{opacity:1;}
+  ::-webkit-scrollbar{width:5px;} ::-webkit-scrollbar-track{background:var(--bg);} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px;}
+</style>
+</head>
+<body>
+<script>
+// ═══════════════════════════════════════════════════
+//  COMPONENT DATA — edit this section directly
+//  layers: api | retrieval | generation | datasource | pipeline
+//  status: ready | inprogress | planned | blocked
+//  deps:   IDs this component depends on (draws arrows FROM dep TO this)
+//  dashed: object where keys are dep IDs that should be dashed lines
+// ═══════════════════════════════════════════════════
+const COMPONENTS = [
+  {id:"nl-api",          name:"NL query API",            layer:"api",        color:"purple",status:"ready",     owner:"TBD",milestone:"v1.0",desc:"Entry point — accepts natural language queries from users.",                        deps:[],                                   dashed:{}},
+  {id:"result-api",      name:"SQL result API",          layer:"api",        color:"purple",status:"ready",     owner:"TBD",milestone:"v1.0",desc:"Returns SQL query results back to the caller.",                                     deps:["snowflake"],                        dashed:{}},
+  {id:"bedrock-embed",   name:"Bedrock embedding",       layer:"retrieval",  color:"teal",  status:"ready",     owner:"TBD",milestone:"v1.0",desc:"Vectorizes the NL query using Bedrock embedding model for similarity search.",      deps:["nl-api"],                           dashed:{}},
+  {id:"opensearch",      name:"OpenSearch",              layer:"retrieval",  color:"teal",  status:"ready",     owner:"TBD",milestone:"v1.0",desc:"Retrieves similar historical SQL query examples using vector similarity.",          deps:["bedrock-embed","opensearch-index"], dashed:{"opensearch-index":true}},
+  {id:"schema-ret",      name:"Schema retrieval",        layer:"retrieval",  color:"teal",  status:"planned",   owner:"TBD",milestone:"v1.2",desc:"Retrieves relevant table schema and metadata to provide context to the LLM.",      deps:["opensearch"],                       dashed:{"opensearch":true}},
+  {id:"bedrock-llm",     name:"Bedrock foundation model",layer:"generation", color:"amber", status:"ready",     owner:"TBD",milestone:"v1.0",desc:"Foundation model on Bedrock that generates SQL from retrieved examples.",          deps:["opensearch","schema-ret"],          dashed:{"schema-ret":true}},
+  {id:"sql-validator",   name:"SQL validator",           layer:"generation", color:"amber", status:"ready",     owner:"TBD",milestone:"v1.0",desc:"Parses and validates the generated SQL before execution.",                        deps:["bedrock-llm"],                      dashed:{}},
+  {id:"tigergraph",      name:"TigerGraph",              layer:"generation", color:"amber", status:"planned",   owner:"TBD",milestone:"v1.3",desc:"Graph query support for future graph-based data retrieval.",                      deps:["sql-validator"],                    dashed:{"sql-validator":true}},
+  {id:"snowflake",       name:"Snowflake",               layer:"datasource", color:"gray",  status:"inprogress",owner:"TBD",milestone:"v1.1",desc:"Executes validated SQL queries against Snowflake. In progress.",                  deps:["sql-validator"],                    dashed:{}},
+  {id:"datalake",        name:"Data lake",               layer:"datasource", color:"gray",  status:"planned",   owner:"TBD",milestone:"v1.2",desc:"Future query source — data lake connection planned after Snowflake.",             deps:["sql-validator"],                    dashed:{"sql-validator":true}},
+  {id:"opensearch-index",name:"OpenSearch index",        layer:"datasource", color:"gray",  status:"ready",     owner:"TBD",milestone:"v1.0",desc:"Stores vectorized historical SQL query examples. Backing store for OpenSearch.",  deps:[],                                   dashed:{}},
+  {id:"ingest-pipeline", name:"Data ingestion pipeline", layer:"pipeline",   color:"coral", status:"planned",   owner:"TBD",milestone:"v1.2",desc:"Extracts and transforms data from Snowflake and Data lake for indexing.",         deps:["snowflake","datalake"],             dashed:{"snowflake":true,"datalake":true}},
+  {id:"embed-pipeline",  name:"Embedding pipeline",      layer:"pipeline",   color:"coral", status:"planned",   owner:"TBD",milestone:"v1.2",desc:"Vectorizes ingested data using Bedrock embedding and writes to OpenSearch index.",deps:["ingest-pipeline","bedrock-embed"],  dashed:{"ingest-pipeline":true,"bedrock-embed":true}},
+  {id:"pipeline-store",  name:"Pipeline storage",        layer:"pipeline",   color:"coral", status:"planned",   owner:"TBD",milestone:"v1.2",desc:"Stores pipeline run state, metadata, and processing history.",                   deps:["embed-pipeline"],                   dashed:{"embed-pipeline":true}},
+];
+
+const LAYER_ORDER  = ["api","retrieval","generation","datasource","pipeline"];
+const LAYER_LABELS = {api:"API",retrieval:"Retrieval",generation:"Generation",datasource:"Data sources",pipeline:"Pipeline"};
+const LAYER_COLORS = {api:"purple",retrieval:"teal",generation:"amber",datasource:"gray",pipeline:"coral"};
+const STATUS_LABEL = {ready:"Ready",inprogress:"In progress",planned:"Planned",blocked:"Blocked"};
+const STATUS_COLOR = {ready:"#4ade80",inprogress:"#f59e0b",planned:"#60a5fa",blocked:"#f87171"};
+const MILESTONE_COLORS = {"v1.0":"#4ade80","v1.1":"#60a5fa","v1.2":"#c084fc","v1.3":"#fb923c","—":"#6b7a99"};
+const COLOR_TITLE  = {purple:"#7c6fcd",teal:"#2dd4bf",amber:"#f59e0b",coral:"#f87171",gray:"#94a3b8"};
+const COLOR_STROKE = {purple:"#3d3570",teal:"#1a4a42",amber:"#4a3010",coral:"#5a2020",gray:"#2a3850"};
+const COLOR_FILL   = {purple:"#1a1730",teal:"#0d2420",amber:"#1f1508",coral:"#2a1010",gray:"#151c2a"};
+const COLOR_SEL    = {purple:"#7c6fcd",teal:"#2dd4bf",amber:"#f59e0b",coral:"#f87171",gray:"#94a3b8"};
+</script>
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo">NL</div>
+    <div><div class="title">NL-to-SQL Data Agent</div><div class="subtitle">architecture tracker</div></div>
+  </div>
+  <div class="header-right">
+    <div class="tabs">
+      <button class="tab active" onclick="setView('arch')">Architecture</button>
+      <button class="tab" onclick="setView('list')">Component list</button>
+    </div>
+    <button class="btn btn-primary" onclick="openAddPanel()">+ Add component</button>
+  </div>
+</div>
+<div class="summary-bar" id="summary-bar"></div>
+
+<div class="main">
+  <div class="diagram-panel" id="diagram-panel">
+    <svg id="arch-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="list-view" style="display:none;max-width:960px;"></div>
+    <p class="hint" id="click-hint">Click any component to view details, edit fields, or manage connections</p>
+  </div>
+  <div class="right-panel collapsed" id="right-panel">
+    <div class="panel-header">
+      <h3 id="panel-title">Component</h3>
+      <button class="close-btn" onclick="closePanel()">✕</button>
+    </div>
+    <div class="panel-body" id="panel-body"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+let components  = JSON.parse(JSON.stringify(COMPONENTS));
+let selectedId  = null;
+let currentView = 'arch';
+let connType    = 'solid';
+
+const SVG_W = 860, NODE_W = 178, NODE_H = 56, BAND_H = 88, BAND_G = 12, PAD_L = 78;
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 1800);
+}
+function getById(id) { return components.find(c => c.id === id); }
+
+// ── Summary ──────────────────────────────────────────
+function renderSummary() {
+  const cnt = {};
+  components.forEach(c => cnt[c.status] = (cnt[c.status]||0)+1);
+  document.getElementById('summary-bar').innerHTML =
+    [['ready','Ready','#4ade80'],['inprogress','In progress','#f59e0b'],['planned','Planned','#60a5fa'],['blocked','Blocked','#f87171']]
+    .map(([k,l,c])=>`<div class="stat"><span class="stat-dot" style="background:${c}"></span><span class="stat-num">${cnt[k]||0}</span><span class="stat-label">${l}</span></div>`)
+    .join('') +
+    `<div class="stat"><span class="stat-num">${components.length}</span><span class="stat-label">Total</span></div>`;
+}
+
+// ── Layout ───────────────────────────────────────────
+function computeLayout() {
+  const layerMap = {};
+  LAYER_ORDER.forEach(l => layerMap[l] = components.filter(c => c.layer === l));
+  const pos = {};
+  LAYER_ORDER.forEach((layer, li) => {
+    const nodes  = layerMap[layer];
+    const bandY  = li*(BAND_H+BAND_G)+20;
+    const totalW = nodes.length*NODE_W + (nodes.length-1)*14;
+    const startX = PAD_L + (SVG_W-PAD_L-20-totalW)/2;
+    nodes.forEach((comp, ni) => {
+      const nx = startX + ni*(NODE_W+14);
+      const ny = bandY + (BAND_H-NODE_H)/2;
+      pos[comp.id] = {cx:nx+NODE_W/2, cy:ny+NODE_H/2, top:ny, bot:ny+NODE_H,
+        left:nx, right:nx+NODE_W, bandTop:bandY, bandBot:bandY+BAND_H, li};
+    });
+  });
+  return pos;
+}
+
+// ── Routing — avoids node boxes ───────────────────────
+// Each arrow travels: exit node vertically → elbow in the gap channel → enter target vertically.
+// Multiple connections sharing the same gap channel get staggered x-offsets so they don't overlap.
+function buildRoutes(pos) {
+  const routes = [];
+  const conns  = [];
+  components.forEach(comp => {
+    (comp.deps||[]).forEach(depId => {
+      if (!pos[depId]||!pos[comp.id]) return;
+      conns.push({from:depId, to:comp.id, dashed:!!(comp.dashed&&comp.dashed[depId])});
+    });
+  });
+
+  // Group by channel key to assign stagger lanes
+  const channelMap = {};
+  conns.forEach((c,i) => {
+    const fp=pos[c.from], tp=pos[c.to];
+    if (!fp||!tp) return;
+    const key = fp.li===tp.li ? `same-${fp.li}` : `gap-${Math.min(fp.li,tp.li)}-${Math.max(fp.li,tp.li)}`;
+    if (!channelMap[key]) channelMap[key]=[];
+    channelMap[key].push(i);
+  });
+
+  // All node boxes for collision check
+  const boxes = Object.values(pos).map(p=>({l:p.left-4,r:p.right+4,t:p.top,b:p.bot}));
+  function hitsBox(x,y1,y2) {
+    return boxes.some(b=>x>b.l&&x<b.r&&Math.min(y1,y2)<b.b&&Math.max(y1,y2)>b.t);
+  }
+
+  conns.forEach((c,i) => {
+    const fp=pos[c.from], tp=pos[c.to];
+    if (!fp||!tp) return;
+
+    let pathD;
+
+    if (fp.li === tp.li) {
+      // Same layer — horizontal
+      if (fp.right <= tp.left) {
+        pathD = `M${fp.right} ${fp.cy} L${tp.left} ${tp.cy}`;
+      } else if (tp.right <= fp.left) {
+        pathD = `M${fp.left} ${fp.cy} L${tp.right} ${tp.cy}`;
+      } else {
+        // Overlap — route through below-band bypass
+        const bypassY = fp.bandBot + 6;
+        pathD = `M${fp.cx} ${fp.bot} L${fp.cx} ${bypassY} L${tp.cx} ${bypassY} L${tp.cx} ${tp.bot}`;
+      }
+    } else {
+      // Cross-layer — elbow routing through gap channel
+      const goDown  = tp.li > fp.li;
+      const fromY   = goDown ? fp.bot  : fp.top;
+      const toY     = goDown ? tp.top  : tp.bot;
+      const chanTop = goDown ? fp.bandBot : tp.bandBot;
+      const chanBot = goDown ? tp.bandTop : fp.bandTop;
+      const midY    = chanTop + (chanBot-chanTop)/2;
+
+      // Assign stagger lane within this channel
+      const chanKey = `gap-${Math.min(fp.li,tp.li)}-${Math.max(fp.li,tp.li)}`;
+      const lane    = channelMap[chanKey]||[];
+      const laneIdx = lane.indexOf(i);
+      const laneN   = lane.length;
+
+      // Try the natural column (from.cx → midY → to.cx)
+      // If the vertical segment from.cx hits another box, shift to a stagger lane
+      const staggerSpread = 18;
+      const baseX = (fp.cx+tp.cx)/2;
+
+      let vxFrom = fp.cx;
+      let vxTo   = tp.cx;
+
+      // Check if direct vertical from fp.cx collides
+      if (hitsBox(fp.cx, fromY, midY)) {
+        const offset = (laneIdx - (laneN-1)/2) * staggerSpread;
+        vxFrom = Math.max(PAD_L-24, Math.min(SVG_W-PAD_L+24, baseX+offset));
+      }
+      if (hitsBox(tp.cx, midY, toY)) {
+        const offset = (laneIdx - (laneN-1)/2) * staggerSpread;
+        vxTo = Math.max(PAD_L-24, Math.min(SVG_W-PAD_L+24, baseX+offset));
+      }
+
+      if (Math.abs(vxFrom-fp.cx)<1 && Math.abs(vxTo-tp.cx)<1 && Math.abs(fp.cx-tp.cx)<2) {
+        // Perfectly aligned — straight line
+        pathD = `M${fp.cx} ${fromY} L${tp.cx} ${toY}`;
+      } else if (Math.abs(vxFrom-vxTo)<2) {
+        // Same vertical lane, just two horizontal jogs
+        pathD = `M${fp.cx} ${fromY} L${fp.cx} ${midY} L${tp.cx} ${midY} L${tp.cx} ${toY}`;
+      } else {
+        // Full 4-segment: exit → stagger lane → horizontal → target lane → enter
+        pathD = `M${fp.cx} ${fromY} L${fp.cx} ${midY} L${tp.cx} ${midY} L${tp.cx} ${toY}`;
+      }
+    }
+    routes.push({...c, pathD});
+  });
+  return routes;
+}
+
+// ── Arch SVG ─────────────────────────────────────────
+function renderArch() {
+  const svg = document.getElementById('arch-svg');
+  const layerMap = {};
+  LAYER_ORDER.forEach(l => layerMap[l] = components.filter(c => c.layer === l));
+  const svgH = LAYER_ORDER.length*(BAND_H+BAND_G)+60;
+  svg.setAttribute('viewBox',`0 0 ${SVG_W} ${svgH}`);
+  svg.setAttribute('width','100%');
+  svg.style.maxWidth = SVG_W+'px';
+
+  const pos    = computeLayout();
+  const routes = buildRoutes(pos);
+
+  let html = `<defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#4a5a7a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker></defs>`;
+
+  // 1. Layer bands drawn FIRST (bottom)
+  LAYER_ORDER.forEach((layer, li) => {
+    const bandY = li*(BAND_H+BAND_G)+20;
+    const lc    = LAYER_COLORS[layer]||'gray';
+    html += `<rect x="20" y="${bandY}" width="${SVG_W-40}" height="${BAND_H}" rx="10" style="fill:#161b27;stroke:#2a3248;stroke-width:1"/>`;
+    html += `<text x="34" y="${bandY+20}" style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;fill:${COLOR_TITLE[lc]};letter-spacing:.06em">${LAYER_LABELS[layer]}</text>`;
+  });
+
+  // 2. Arrows drawn SECOND — can overlay layer bands, nodes paint over them last
+  routes.forEach(r => {
+    const dash = r.dashed ? 'stroke-dasharray="5 3"' : '';
+    html += `<path d="${r.pathD}" fill="none" stroke="#4a5a7a" stroke-width="1" ${dash} marker-end="url(#arr)"/>`;
+  });
+
+  // Nodes — drawn LAST, on top of all arrows
+  components.forEach(comp => {
+    const p    = pos[comp.id];
+    if (!p) return;
+    const sel    = selectedId===comp.id;
+    const stroke = sel ? COLOR_SEL[comp.color] : COLOR_STROKE[comp.color];
+    const sw     = sel ? 2 : 1;
+
+    html += `<g style="cursor:pointer" onclick="selectNode('${comp.id}')">
+      <rect x="${p.left}" y="${p.top}" width="${NODE_W}" height="${NODE_H}" rx="8"
+        style="fill:${COLOR_FILL[comp.color]};stroke:${stroke};stroke-width:${sw}"/>
+      <text x="${p.cx}" y="${p.top+20}" text-anchor="middle" dominant-baseline="central"
+        style="fill:${COLOR_TITLE[comp.color]};font-family:'IBM Plex Sans',sans-serif;font-size:13px;font-weight:500;pointer-events:none">${comp.name}</text>
+      <text x="${p.cx}" y="${p.top+38}" text-anchor="middle" dominant-baseline="central"
+        style="fill:#6b7a99;font-family:'IBM Plex Mono',monospace;font-size:10px;pointer-events:none">${STATUS_LABEL[comp.status]} · ${comp.milestone}</text>
+    </g>`;
+  });
+
+  svg.innerHTML = html;
+}
+
+// ── List view ────────────────────────────────────────
+function renderList() {
+  const rows = components.map(c => {
+    const lc   = LAYER_COLORS[c.layer]||'gray';
+    const deps = (c.deps||[]).map(d=>{const dep=getById(d);return dep?dep.name:d;}).join(', ')||'—';
+    return `<tr onclick="selectNode('${c.id}')" style="${selectedId===c.id?'background:var(--bg3)':''}">
+      <td style="font-weight:500">${c.name}</td>
+      <td><span style="font-size:10px;padding:2px 8px;border-radius:99px;background:${COLOR_FILL[lc]};color:${COLOR_TITLE[lc]};font-family:var(--mono)">${LAYER_LABELS[c.layer]}</span></td>
+      <td><span style="width:7px;height:7px;border-radius:50%;background:${STATUS_COLOR[c.status]};display:inline-block;margin-right:5px"></span>${STATUS_LABEL[c.status]}</td>
+      <td style="color:var(--muted)">${c.owner}</td>
+      <td style="font-family:var(--mono);font-size:11px;color:${MILESTONE_COLORS[c.milestone]||'var(--muted)'}">${c.milestone}</td>
+      <td style="color:var(--muted);font-size:11px">${deps}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('list-view').innerHTML =
+    `<table class="list-tbl"><thead><tr>${['Component','Layer','Status','Owner','Milestone','Connections'].map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ── Panel ────────────────────────────────────────────
+function selectNode(id) { selectedId=id; render(); openDetailPanel(id); }
+
+function openDetailPanel(id) {
+  const comp = getById(id);
+  if (!comp) return;
+  document.getElementById('panel-title').textContent = comp.name;
+  document.getElementById('right-panel').classList.remove('collapsed');
+  refreshPanelBody(comp);
+}
+
+function refreshPanelBody(comp) {
+  // Outgoing connections (comp depends on these)
+  const outItems = (comp.deps||[]).map(depId => {
+    const dep = getById(depId);
+    if (!dep) return '';
+    const isDash = !!(comp.dashed&&comp.dashed[depId]);
+    return `<div class="conn-item">
+      <span class="conn-name">${dep.name}</span>
+      <span class="conn-badge ${isDash?'conn-dashed':'conn-solid'}">${isDash?'planned':'active'}</span>
+      <button class="conn-remove" title="Remove" onclick="removeConn('${comp.id}','${depId}')">✕</button>
+    </div>`;
+  }).join('');
+
+  // Incoming connections (these depend on comp)
+  const inItems = components.filter(c=>c.id!==comp.id&&(c.deps||[]).includes(comp.id)).map(c=>{
+    const isDash = !!(c.dashed&&c.dashed[comp.id]);
+    return `<div class="conn-item">
+      <span class="conn-name">${c.name}</span>
+      <span class="conn-badge ${isDash?'conn-dashed':'conn-solid'}">${isDash?'planned':'active'}</span>
+      <span class="conn-dir">↑ incoming</span>
+    </div>`;
+  }).join('');
+
+  // Add-connection dropdown — exclude self and existing deps
+  const existing = new Set(comp.deps||[]);
+  const opts = components.filter(c=>c.id!==comp.id&&!existing.has(c.id))
+    .map(c=>`<option value="${c.id}">[${LAYER_LABELS[c.layer]}] ${c.name}</option>`).join('');
+
+  document.getElementById('panel-body').innerHTML = `
+    <div class="detail-name">${comp.name}</div>
+    <p style="font-size:11px;color:var(--muted);margin:4px 0 12px">${comp.desc||'—'}</p>
+    <div class="detail-row"><span class="detail-label">Status</span><span class="badge badge-${comp.status}">${STATUS_LABEL[comp.status]}</span></div>
+    <div class="detail-row"><span class="detail-label">Layer</span><span class="detail-val">${LAYER_LABELS[comp.layer]}</span></div>
+    <div class="detail-row"><span class="detail-label">Owner</span><span class="detail-val">${comp.owner}</span></div>
+    <div class="detail-row"><span class="detail-label">Milestone</span><span class="detail-val" style="color:${MILESTONE_COLORS[comp.milestone]||'var(--muted)'}">${comp.milestone}</span></div>
+
+    <div class="section-title">Outgoing connections <span style="color:var(--dim);font-size:10px">(this depends on)</span></div>
+    ${outItems||'<div style="font-size:11px;color:var(--dim);padding:3px 0 6px">No outgoing connections</div>'}
+
+    <div class="add-conn-box">
+      <label>Connect this node to another</label>
+      <select id="conn-sel">${opts||'<option disabled>No available targets</option>'}</select>
+      <div class="type-row">
+        <button class="type-opt ${connType==='solid'?'active':''}" onclick="setConnType('solid',this)">Solid — active</button>
+        <button class="type-opt ${connType==='dashed'?'active':''}" onclick="setConnType('dashed',this)">Dashed — planned</button>
+      </div>
+      <button class="btn-sm" onclick="addConn('${comp.id}')">+ Add connection</button>
+    </div>
+
+    ${inItems?`<div class="section-title">Incoming connections <span style="color:var(--dim);font-size:10px">(depends on this)</span></div>${inItems}`:''}
+
+    <div class="edit-section">
+      <h4>Edit component</h4>
+      <div class="field"><label>Name</label><input id="e-name" value="${comp.name}"></div>
+      <div class="field"><label>Owner</label><input id="e-owner" value="${comp.owner}"></div>
+      <div class="field"><label>Status</label>
+        <select id="e-status">${['ready','inprogress','planned','blocked'].map(s=>`<option value="${s}" ${comp.status===s?'selected':''}>${STATUS_LABEL[s]}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Layer</label>
+        <select id="e-layer">${LAYER_ORDER.map(l=>`<option value="${l}" ${comp.layer===l?'selected':''}>${LAYER_LABELS[l]}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Milestone</label>
+        <select id="e-milestone">${['v1.0','v1.1','v1.2','v1.3','—'].map(m=>`<option value="${m}" ${comp.milestone===m?'selected':''}>${m}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Description</label><textarea id="e-desc">${comp.desc||''}</textarea></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="saveEdit('${comp.id}')">Save</button>
+        <button class="btn btn-danger" onclick="deleteComp('${comp.id}')">Delete</button>
+      </div>
+    </div>`;
+}
+
+// ── Connection actions ────────────────────────────────
+function setConnType(type, btn) {
+  connType = type;
+  document.querySelectorAll('.type-opt').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+}
+
+function addConn(fromId) {
+  const sel = document.getElementById('conn-sel');
+  if (!sel||!sel.value) { toast('Select a target first'); return; }
+  const comp = getById(fromId);
+  if (!comp) return;
+  if (!comp.deps) comp.deps=[];
+  if (comp.deps.includes(sel.value)) { toast('Already connected'); return; }
+  comp.deps.push(sel.value);
+  if (!comp.dashed) comp.dashed={};
+  if (connType==='dashed') comp.dashed[sel.value]=true;
+  else delete comp.dashed[sel.value];
+  render();
+  refreshPanelBody(comp);
+  toast('Connection added');
+}
+
+function removeConn(fromId, toId) {
+  const comp = getById(fromId);
+  if (!comp) return;
+  comp.deps = (comp.deps||[]).filter(d=>d!==toId);
+  if (comp.dashed) delete comp.dashed[toId];
+  render();
+  refreshPanelBody(comp);
+  toast('Connection removed');
+}
+
+// ── Component CRUD ────────────────────────────────────
+function saveEdit(id) {
+  const comp = getById(id);
+  if (!comp) return;
+  comp.name      = document.getElementById('e-name').value.trim()||comp.name;
+  comp.owner     = document.getElementById('e-owner').value.trim();
+  comp.status    = document.getElementById('e-status').value;
+  comp.layer     = document.getElementById('e-layer').value;
+  comp.milestone = document.getElementById('e-milestone').value;
+  comp.desc      = document.getElementById('e-desc').value.trim();
+  comp.color     = LAYER_COLORS[comp.layer];
+  render();
+  refreshPanelBody(comp);
+  toast('Saved');
+}
+
+function deleteComp(id) {
+  if (!confirm('Delete this component? All connections to it will also be removed.')) return;
+  components = components.filter(c=>c.id!==id);
+  components.forEach(c=>{ c.deps=(c.deps||[]).filter(d=>d!==id); if(c.dashed) delete c.dashed[id]; });
+  selectedId=null; closePanel(); render(); toast('Deleted');
+}
+
+function openAddPanel() {
+  selectedId=null;
+  document.getElementById('panel-title').textContent='New component';
+  document.getElementById('right-panel').classList.remove('collapsed');
+  document.getElementById('panel-body').innerHTML=`
+    <div class="edit-section">
+      <h4>Add component</h4>
+      <div class="field"><label>Name</label><input id="n-name" placeholder="e.g. Query cache"></div>
+      <div class="field"><label>Owner</label><input id="n-owner" placeholder="e.g. Jing"></div>
+      <div class="field"><label>Status</label>
+        <select id="n-status">${['planned','inprogress','ready','blocked'].map(s=>`<option value="${s}">${STATUS_LABEL[s]}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Layer</label>
+        <select id="n-layer">${LAYER_ORDER.map(l=>`<option value="${l}">${LAYER_LABELS[l]}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Milestone</label>
+        <select id="n-milestone">${['v1.0','v1.1','v1.2','v1.3','—'].map(m=>`<option value="${m}" ${m==='v1.2'?'selected':''}>${m}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Description</label><textarea id="n-desc" placeholder="What does this component do?"></textarea></div>
+      <div class="btn-row"><button class="btn btn-primary" onclick="doAdd()">Add component</button></div>
+    </div>`;
+  render();
+}
+
+function doAdd() {
+  const name = document.getElementById('n-name').value.trim();
+  if (!name) { toast('Name required'); return; }
+  const layer = document.getElementById('n-layer').value;
+  const id    = name.toLowerCase().replace(/[^a-z0-9]/g,'-')+'-'+Date.now().toString(36);
+  components.push({id,name,layer,color:LAYER_COLORS[layer],
+    status:document.getElementById('n-status').value,
+    owner:document.getElementById('n-owner').value.trim()||'TBD',
+    milestone:document.getElementById('n-milestone').value,
+    desc:document.getElementById('n-desc').value.trim(),
+    deps:[],dashed:{}});
+  selectedId=id; render(); openDetailPanel(id); toast('Added: '+name);
+}
+
+function closePanel() {
+  document.getElementById('right-panel').classList.add('collapsed');
+  selectedId=null; render();
+}
+
+function setView(v) {
+  currentView=v;
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',(i===0&&v==='arch')||(i===1&&v==='list')));
+  document.getElementById('arch-svg').style.display  =v==='arch'?'block':'none';
+  document.getElementById('list-view').style.display =v==='list'?'block':'none';
+  document.getElementById('click-hint').style.display=v==='arch'?'block':'none';
+  if(v==='list') renderList();
+}
+
+function render() { renderSummary(); if(currentView==='arch') renderArch(); else renderList(); }
+render();
+</script>
+</body>
+</html>
