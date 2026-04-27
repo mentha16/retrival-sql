@@ -1,0 +1,49 @@
+Build an interactive join graph visualization using pyvis. Follow these style rules exactly:
+
+NODES:
+- Shape: circle ("dot") for all nodes
+- Hub tables (degree >= 4): color #D85A30, size 36
+- Regular tables (degree 2-3): color #378ADD, size 28
+- Leaf tables (degree 1): color #1D9E75, size 22
+- Isolated tables (degree 0): color #888780, size 20
+- Border (stroke) color: same as fill but slightly darker, width 0.5px
+- Font: Arial or sans-serif, size 14, color white for hub/regular, dark for isolated
+
+EDGES:
+- Color: #B4B2A9 (neutral gray)
+- Width: proportional to join frequency — width = 1 + (join_count * 0.8), max 6
+- Style: solid for intra-cluster joins, dashed for cross-cluster joins
+- No arrows (undirected graph)
+
+CLUSTER VISUALIZATION:
+- After running Louvain community detection, draw a dashed rounded rectangle 
+  around each cluster as a background region
+- Cluster region colors (fill at 5% opacity, dashed border at 40% opacity):
+  - Cluster 0: #D85A30 (coral/order domain)
+  - Cluster 1: #378ADD (blue/user domain)  
+  - Cluster 2: #1D9E75 (teal/product domain)
+  - Cluster 3: #7F77DD (purple, if needed)
+  - Cluster 4: #888780 (gray, for isolated nodes)
+- Add a small text label at the top of each cluster region
+
+LAYOUT:
+- Use ForceAtlas2 physics layout
+- gravitationalConstant: -80
+- springLength: 150
+- springConstant: 0.05
+- damping: 0.9
+- Node repulsion: enabled
+
+TOOLTIP (shown on hover):
+- Table name
+- Degree (number of distinct tables it joins with)
+- Total join frequency (sum of all edge weights)
+- Cluster/community name
+- Core or peripheral label
+
+BACKGROUND: white (#ffffff)
+FONT: Arial 14px for node labels
+
+Use networkx for the graph structure and community detection 
+(louvain_communities with weight='weight', seed=42).
+Use pyvis Network for rendering, output as join_graph.html.
