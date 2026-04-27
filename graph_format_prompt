@@ -1,0 +1,35 @@
+Build an interactive SQL join graph using pyvis. Follow these style rules exactly:
+
+NODES:
+- Shape: circle ("dot") for all nodes
+- Hub tables (degree >= 4): color #D85A30, size 36
+- Regular tables (degree 2-3): color #378ADD, size 28  
+- Leaf tables (degree 1): color #1D9E75, size 22
+- Isolated tables (degree 0): color #888780, size 20
+- Font: Arial 14px, bold, color white
+
+EDGES:
+- Color: #B4B2A9 (neutral gray)
+- Width: proportional to join frequency — width = 1 + (join_count * 0.8), max 6
+- No arrows (undirected graph)
+
+TOOLTIP (shown on hover):
+- Table name
+- Degree (number of distinct tables it joins with)
+- Total join frequency (sum of all edge weights)
+
+LAYOUT:
+- Use ForceAtlas2 physics layout
+- gravitationalConstant: -80
+- springLength: 150
+- springConstant: 0.05
+- damping: 0.9
+
+BACKGROUND: white (#ffffff)
+
+INPUT FORMAT:
+edges is a dict of {(table_a, table_b): {"weight": int}} 
+nodes is a dict of {table_name: appearance_count}
+
+Use networkx for the graph structure.
+Use pyvis Network for rendering, output as join_graph.html.
