@@ -47,3 +47,29 @@ FONT: Arial 14px for node labels
 Use networkx for the graph structure and community detection 
 (louvain_communities with weight='weight', seed=42).
 Use pyvis Network for rendering, output as join_graph.html.
+
+
+Given this networkx graph G where:
+- nodes are table names
+- edges have a "weight" attribute = number of times those two tables are joined together
+
+Do the following:
+
+1. Run Louvain community detection:
+   from networkx.algorithms.community import louvain_communities
+   communities = louvain_communities(G, weight='weight', seed=42)
+
+2. Assign each node a 'community' attribute (integer cluster id):
+   for i, community in enumerate(communities):
+       for table in community:
+           G.nodes[table]['community'] = i
+
+3. Print each cluster and its tables so I can verify the grouping makes sense.
+
+4. In the pyvis visualization, color each node by its community id:
+   CLUSTER_COLORS = ['#D85A30', '#378ADD', '#1D9E75', '#7F77DD', '#888780']
+   node_color = CLUSTER_COLORS[G.nodes[table]['community'] % len(CLUSTER_COLORS)]
+
+The clustering is based entirely on join frequency between tables — 
+tables that frequently join together should end up in the same cluster.
+No column names or schema metadata is used.
